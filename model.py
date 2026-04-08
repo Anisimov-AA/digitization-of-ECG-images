@@ -51,6 +51,9 @@ class CoordConvDecoderBlock(nn.Module):
     def forward(self, x, skip=None):
         x = F.interpolate(x, scale_factor=self.scale, mode='nearest')
         if skip is not None:
+            # Handle size mismatch from odd dimensions in encoder
+            if x.shape[2:] != skip.shape[2:]:
+                x = F.interpolate(x, size=skip.shape[2:], mode='nearest')
             x = torch.cat([x, skip], dim=1)
 
         B, C, H, W = x.shape
