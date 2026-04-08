@@ -141,7 +141,7 @@ def run_training(resume=None):
     start_epoch = 0
     best_snr = -999
     if resume and os.path.exists(resume):
-        ckpt = torch.load(resume, map_location=CFG.device)
+        ckpt = torch.load(resume, map_location=CFG.device, weights_only=False)
         model.load_state_dict(ckpt['state_dict'])
         best_snr = ckpt.get('snr', -999)
         start_epoch = ckpt.get('epoch', 0)
