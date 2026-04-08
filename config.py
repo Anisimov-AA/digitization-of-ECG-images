@@ -56,7 +56,7 @@ class CFG:
 
     # --- Training ---
     epochs = 30
-    batch_size = 8
+    batch_size = 4
     lr = 1e-4
     weight_decay = 1e-4
     num_workers = 2
