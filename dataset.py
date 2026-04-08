@@ -18,7 +18,6 @@
 
 import cv2
 import numpy as np
-import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from config import CFG
@@ -32,21 +31,6 @@ def load_sparse_mask(filepath):
     for i in range(shape[0]):
         mask[i, d[f'ch{i}_y'], d[f'ch{i}_x']] = d[f'ch{i}_v']
     return mask
-
-
-def clean_image(img):
-    """
-    Remove colored grid lines from the ECG image.
-    Keeps only dark pixels (the signal trace) and sets
-    everything else to white. This helps the model focus
-    on the trace rather than learning to ignore grid lines.
-    """
-    r, g = img[:, :, 0].astype(float), img[:, :, 1].astype(float)
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    mask = (gray < 120) & ((r - g) < 10)
-    cleaned = np.full_like(img, 255)
-    cleaned[mask] = img[mask]
-    return cleaned
 
 
 def crop_row(img, mask_channel, row_idx, cfg):
@@ -119,7 +103,6 @@ class ECGRowDataset(Dataset):
         img = cv2.imread(img_path, cv2.IMREAD_COLOR)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = cv2.resize(img, (cfg.img_w, cfg.img_h), interpolation=cv2.INTER_LINEAR)
-        img = clean_image(img)
 
         # Load mask
         mask_path = f'{cfg.data_dir}/masks/{sid}.mask-coo.npz'
