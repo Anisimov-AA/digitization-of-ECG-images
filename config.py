@@ -15,9 +15,9 @@ class CFG:
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
     # --- Paths ---
-    data_dir = '/content/ecg-data/data'
+    data_dir = 'data'
     save_dir = '/content/drive/MyDrive/ecg/checkpoints'
-
+    
     # --- Fold ---
     # We split 977 images into 5 groups. One group is held out
     # for validation, the rest are used for training.
