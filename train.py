@@ -111,6 +111,14 @@ def run_training(resume=None):
         dtype={'id': str, 'type_id': str}
     )
 
+    # Reassign folds as proper 80/20 split on current data
+    unique_ids = fold_df['id'].unique()
+    np.random.seed(CFG.seed)
+    np.random.shuffle(unique_ids)
+    split = int(len(unique_ids) * 0.8)
+    val_ids = set(unique_ids[split:])
+    fold_df['fold'] = fold_df['id'].apply(lambda x: 0 if x in val_ids else 1)
+
     train_df = fold_df[fold_df['fold'] != CFG.fold].reset_index(drop=True)
     val_df = fold_df[fold_df['fold'] == CFG.fold].reset_index(drop=True)
     print(f'Train: {len(train_df)} images ({len(train_df)*4} rows)')
