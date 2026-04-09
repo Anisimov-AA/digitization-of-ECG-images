@@ -137,7 +137,7 @@ class ECGRowNet(nn.Module):
 
         # Encoder
         self.encoder = timm.create_model(
-            cfg.backbone, pretrained=True,
+            cfg.backbone, pretrained=cfg.pretrained,
             in_chans=3, num_classes=0, global_pool=''
         )
         enc_dims = [64, 128, 256, 512]  # resnet34

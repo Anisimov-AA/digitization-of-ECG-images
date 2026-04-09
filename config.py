@@ -1,4 +1,6 @@
 # This is the single source of truth for all settings.
+# Every other file reads from here, so you never need to
+# hunt through code to change a number.
 #
 # Sections:
 #   - Paths: where data lives and where checkpoints get saved
@@ -17,7 +19,7 @@ class CFG:
     # --- Paths ---
     data_dir = 'data'
     save_dir = '/content/drive/MyDrive/ecg/checkpoints'
-    
+
     # --- Fold ---
     # We split 977 images into 5 groups. One group is held out
     # for validation, the rest are used for training.
@@ -49,14 +51,17 @@ class CFG:
     # ResNet34 UNet with coordinate-aware decoder.
     # Soft-argmax head predicts one y-position per pixel column,
     # which we convert to millivolts using the physics above.
+    # pretrained=False because we load our own trained weights.
     backbone = 'resnet34.a3_in1k'
+    pretrained = False
     decoder_dims = [256, 128, 64, 32]
     n_leads = 1
     temperature = 0.5
 
     # --- Training ---
+    # For fine-tuning: lower lr than initial training (was 1e-4)
     epochs = 30
     batch_size = 4
-    lr = 1e-4
+    lr = 5e-5
     weight_decay = 1e-4
     num_workers = 2
