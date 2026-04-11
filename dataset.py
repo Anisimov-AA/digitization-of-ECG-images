@@ -1,5 +1,3 @@
-# === dataset.py ===
-#
 # Handles loading and preparing data for training.
 #
 # Each rectified ECG image (1700 x 5600) contains 4 signal rows.
@@ -11,10 +9,6 @@
 # For each crop we also extract the ground-truth y-position
 # of the signal from the precomputed mask, and convert it to
 # millivolts so we can compute the competition metric.
-#
-# Augmentations:
-#   - Horizontal flip (the signal is valid in both directions)
-#   - More can be added here later without touching other files
 
 import cv2
 import numpy as np
@@ -67,6 +61,87 @@ def crop_row(img, mask_channel, row_idx, cfg):
     return row_img, row_mask
 
 
+def to_grayscale_3ch(img):
+    """
+    Convert RGB to grayscale, then copy to 3 channels.
+    Removes color as noise source (grid colors vary across image types)
+    while keeping 3-channel input for pretrained encoder compatibility.
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    return np.stack([gray, gray, gray], axis=-1)
+
+
+def augment_image(img):
+    """
+    Apply random augmentations to simulate image degradation.
+    Each augmentation is applied independently with 50% probability.
+    """
+    img = img.astype(np.float32)
+
+    # Random brightness/gamma (like 1st place: gamma 0.9/1.0/1.1)
+    if np.random.random() > 0.5:
+        gamma = np.random.uniform(0.8, 1.2)
+        img = np.power(img / 255.0, gamma) * 255.0
+
+    # Random Gaussian blur (simulates camera out of focus)
+    if np.random.random() > 0.5:
+        ksize = np.random.choice([3, 5])
+        img = cv2.GaussianBlur(img, (ksize, ksize), 0)
+
+    # Random noise (simulates scanning/photo noise)
+    if np.random.random() > 0.5:
+        noise = np.random.normal(0, np.random.uniform(2, 8), img.shape)
+        img = img + noise
+
+    # Random contrast
+    if np.random.random() > 0.5:
+        factor = np.random.uniform(0.8, 1.2)
+        mean = img.mean()
+        img = (img - mean) * factor + mean
+
+    img = np.clip(img, 0, 255).astype(np.uint8)
+    return img
+
+
+def make_adaptive_mask(row_mask, gt_y, cfg):
+    """
+    Create mask with adaptive sigma for sharp peaks.
+    Where the signal changes rapidly (sharp peaks), use wider Gaussian
+    so the model gets a softer target that's easier to learn.
+    From 3rd place solution.
+    """
+    sigma_base = 2.0
+    adaptive_factor = 0.4
+
+    # Compute local change in y-position
+    local_diff = 0.5 * (
+        np.abs(gt_y - np.roll(gt_y, 1)) +
+        np.abs(gt_y - np.roll(gt_y, -1))
+    )
+    # Fix edges
+    local_diff[0] = local_diff[1]
+    local_diff[-1] = local_diff[-2]
+
+    # Adaptive sigma: wider where signal changes fast
+    sigma_arr = sigma_base + adaptive_factor * np.maximum(local_diff - 3 * sigma_base, 0) / 3.0
+
+    # Rebuild mask with adaptive sigma
+    H = cfg.crop_h
+    W = len(gt_y)
+    adaptive_mask = np.zeros((H, W), dtype=np.float32)
+    y_coords = np.arange(H, dtype=np.float32)
+
+    for col in range(W):
+        sigma = sigma_arr[col]
+        adaptive_mask[:, col] = np.exp(-0.5 * ((y_coords - gt_y[col]) / sigma) ** 2)
+
+    # Normalize per column
+    col_sum = adaptive_mask.sum(axis=0, keepdims=True) + 1e-8
+    adaptive_mask = adaptive_mask / col_sum
+
+    return adaptive_mask
+
+
 class ECGRowDataset(Dataset):
     """
     Dataset that yields individual row crops.
@@ -104,6 +179,9 @@ class ECGRowDataset(Dataset):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = cv2.resize(img, (cfg.img_w, cfg.img_h), interpolation=cv2.INTER_LINEAR)
 
+        # Convert to grayscale (3 channels for encoder compatibility)
+        img = to_grayscale_3ch(img)
+
         # Load mask
         mask_path = f'{cfg.data_dir}/masks/{sid}.mask-coo.npz'
         full_mask = load_sparse_mask(mask_path)
@@ -111,19 +189,26 @@ class ECGRowDataset(Dataset):
         # Crop this row
         row_img, row_mask = crop_row(img, full_mask[row_idx], row_idx, cfg)
 
-        # --- Augmentation ---
-        if self.is_train and np.random.random() > 0.5:
-            row_img = np.fliplr(row_img).copy()
-            row_mask = np.fliplr(row_mask).copy()
+        # --- Augmentation (training only) ---
+        if self.is_train:
+            # Horizontal flip
+            if np.random.random() > 0.5:
+                row_img = np.fliplr(row_img).copy()
+                row_mask = np.fliplr(row_mask).copy()
+
+            # Image augmentations
+            row_img = augment_image(row_img)
 
         # --- Extract ground-truth y-position from mask ---
-        # For each column, compute weighted mean of y-coordinates
         y_coords = np.arange(cfg.crop_h, dtype=np.float32).reshape(-1, 1)
         col_sum = row_mask.sum(axis=0) + 1e-8
         gt_y = (row_mask * y_coords).sum(axis=0) / col_sum  # (signal_w,)
 
+        # --- Build adaptive sigma mask ---
+        if self.is_train and cfg.use_adaptive_sigma:
+            row_mask = make_adaptive_mask(row_mask, gt_y, cfg)
+
         # Convert y-position to millivolts
-        # In the crop, baseline is at crop_h // 2
         half = cfg.crop_h // 2
         gt_mv = (half - gt_y) / cfg.mv_to_pixel  # (signal_w,)
 
