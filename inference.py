@@ -3,7 +3,10 @@
 # crops each of the 4 rows, predicts millivolt values,
 # and saves the result as .npy files.
 #
-# Used in the Kaggle submission notebook after Stage 0+1.
+# Improvements over baseline:
+#   1. TTA (horizontal flip) — averages original + flipped prediction
+#   2. Split-then-resample — splits row into leads first, resamples each separately
+#   3. Einthoven's Law correction — enforces II=I+III and aVR+aVL+aVF=0
 
 import os
 import cv2
@@ -63,7 +66,6 @@ def predict_image(model, rect_path, device, use_tta=True):
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     img = cv2.resize(img, (IMG_W, IMG_H), interpolation=cv2.INTER_LINEAR)
 
-    half = CROP_H // 2
     series = np.zeros((4, SIGNAL_W), dtype=np.float32)
 
     for row_idx in range(4):
@@ -100,65 +102,83 @@ def predict_image(model, rect_path, device, use_tta=True):
 def series_to_leads(series, lead_lengths):
     """
     Split 4 row predictions into 12 individual leads.
+    FIXED: splits at pixel level first, then resamples each lead separately.
+    This avoids boundary artifacts from resampling concatenated signals.
 
     Args:
-        series: (4, signal_w) mV predictions
+        series: (4, SIGNAL_W) mV predictions
         lead_lengths: dict {lead_name: number_of_rows} from test.csv
 
     Returns:
         dict {lead_name: array of mV values}
     """
     result = {}
+    quarter = SIGNAL_W // 4  # 1250 pixels per lead
 
     for row_idx in range(3):
         leads = ROW_TO_LEADS[row_idx]
-        lengths = [lead_lengths[lead] for lead in leads]
+        for i, lead in enumerate(leads):
+            # Split at pixel level — each lead gets exactly 1/4 of the row
+            lead_pixels = series[row_idx, i * quarter:(i + 1) * quarter]
+            target_len = lead_lengths[lead]
 
-        # Lead II in row 1 gets remaining length
-        if leads[0] == 'II':
-            lengths[0] = lengths[0] - sum(lengths[1:])
+            # For short II in row 1, use same target as other leads
+            if lead == 'II' and row_idx == 1:
+                target_len = lead_lengths['I']
 
-        # Resample row to total length then split
-        total_len = sum(lengths)
-        row_resampled = scipy_signal.resample(series[row_idx], total_len).astype(np.float32)
+            # Resample each lead individually
+            result[lead] = scipy_signal.resample(
+                lead_pixels, target_len
+            ).astype(np.float32)
 
-        idx = np.cumsum(lengths)[:-1]
-        splits = np.split(row_resampled, idx)
-        for lead, s in zip(leads, splits):
-            result[lead] = s
-
-    # Row 3: Lead II full
-    result['II'] = scipy_signal.resample(series[3], lead_lengths['II']).astype(np.float32)
+    # Lead II full rhythm strip
+    ii_len = lead_lengths['II']
+    result['II'] = scipy_signal.resample(
+        series[3], ii_len
+    ).astype(np.float32)
 
     return result
 
 
-def run_inference(model, test_df, rect_dir, out_dir, device, use_tta=True):
+def apply_einthoven(leads):
     """
-    Run inference on all test images.
+    Apply Einthoven's Law to correct lead predictions.
+    Physical constraints of ECG:
+      - II = I + III  (Einthoven's triangle)
+      - aVR + aVL + aVF = 0  (Goldberger leads)
 
-    Args:
-        model: trained ECGRowNet in eval mode
-        test_df: test.csv dataframe
-        rect_dir: directory with rectified images
-        out_dir: directory to save .npy predictions
-        device: cuda device
-        use_tta: use horizontal flip TTA
+    Only applied when predictions are already close to satisfying
+    the constraint — otherwise the correction could make things worse.
     """
-    os.makedirs(out_dir, exist_ok=True)
-    sample_ids = test_df['id'].astype(str).unique()
+    # Check if II ≈ I + III
+    if 'I' in leads and 'II' in leads and 'III' in leads:
+        # Need same length — use shortest
+        min_len = min(len(leads['I']), len(leads['II']), len(leads['III']))
+        I = leads['I'][:min_len]
+        II = leads['II'][:min_len]
+        III = leads['III'][:min_len]
 
-    for n, sid in enumerate(sample_ids):
-        rect_path = f'{rect_dir}/{sid}.rect.png'
+        error = np.abs(II - I - III).mean()
+        if error < 0.1:  # close enough to correct
+            # Average: enforce II = I + III
+            corrected_II = (II + I + III) / 2.0
+            corrected_sum = I + III
+            # Blend: 50% original, 50% corrected
+            leads['II'][:min_len] = (II + corrected_sum) / 2.0
 
-        if not os.path.exists(rect_path):
-            print(f'  SKIP {sid}: no rectified image')
-            continue
+    # Check if aVR + aVL + aVF ≈ 0
+    if 'aVR' in leads and 'aVL' in leads and 'aVF' in leads:
+        min_len = min(len(leads['aVR']), len(leads['aVL']), len(leads['aVF']))
+        aVR = leads['aVR'][:min_len]
+        aVL = leads['aVL'][:min_len]
+        aVF = leads['aVF'][:min_len]
 
-        series = predict_image(model, rect_path, device, use_tta)
-        np.save(f'{out_dir}/{sid}.series.npy', series)
+        error = np.abs(aVR + aVL + aVF).mean()
+        if error < 0.1:
+            # Subtract average offset to enforce sum = 0
+            offset = (aVR + aVL + aVF) / 3.0
+            leads['aVR'][:min_len] -= offset
+            leads['aVL'][:min_len] -= offset
+            leads['aVF'][:min_len] -= offset
 
-        if (n + 1) % 100 == 0 or n < 3:
-            print(f'  {n+1}/{len(sample_ids)} done')
-
-    print(f'  Inference complete: {len(sample_ids)} images')
+    return leads
